@@ -1,0 +1,9 @@
+CREATE USER strapi_user WITH PASSWORD 'Pass1234';
+GRANT ALL PRIVILEGES ON DATABASE strapi_db TO strapi_user;
+
+
+GRANT ALL PRIVILEGES ON DATABASE strapi_db TO strapi_user;
+
+GRANT ALL ON SCHEMA public TO strapi_user;
+
+ALTER SCHEMA public OWNER TO strapi_user;
