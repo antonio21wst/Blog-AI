@@ -3,10 +3,12 @@ const axios = require("axios");
 
 // 1. Pega aquí todos los enlaces que tengas de la agencia
 const enlacesAgencia = [
-  "https://polloparatodos.com",
+  /*"https://polloparatodos.com",
   "https://www.visualizamasideas.com/", // Reemplaza o agrega todos los que necesites
-  "https://www.pecuarius.com/",
-  "https://hotelpachuca.com/",
+  "https://www.pecuarius.com/",*/
+  "https://www.lajoyahoteles.com/",
+  "https://hotelpachuca.com/reservacion_bk.php",
+  "https://lajoyahoteles.com/reservacion.php",
 ];
 
 async function inyectarNuevosProyectos() {

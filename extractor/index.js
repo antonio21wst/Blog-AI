@@ -2,213 +2,164 @@ require("dotenv").config();
 const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const axios = require("axios");
-const cron = require("node-cron");
-const FormData = require("form-data"); // NUEVA IMPORTACIÓN
 
-function analyzeStack(html, $) {
-  const techs = [];
-  const htmlString = html.toLowerCase();
+const BASE_URL = "https://www.lajoyahoteles.com";
 
-  if (htmlString.includes("_next/static") || htmlString.includes('id="__next"'))
-    techs.push("Next.js");
-  if (htmlString.includes("react") || htmlString.includes("data-reactroot"))
-    techs.push("React");
-  if (htmlString.includes("firebase")) techs.push("Firebase");
-  if (htmlString.includes("tailwind")) techs.push("Tailwind CSS");
-  if (htmlString.includes("jquery")) techs.push("jQuery");
-  if (htmlString.includes("wp-content/themes")) techs.push("WordPress");
-  if (htmlString.includes("bootstrap")) techs.push("Bootstrap");
-
-  const generator = $('meta[name="generator"]').attr("content");
-  if (generator) techs.push(generator.split(" ")[0]);
-
-  return [...new Set(techs)];
-}
-
-async function getProjectsFromStrapi() {
-  try {
-    const response = await axios.get(
-      `${process.env.STRAPI_URL}/api/proyectos`,
-      {
-        headers: { Authorization: `Bearer ${process.env.STRAPI_TOKEN}` },
-      },
-    );
-    return response.data.data;
-  } catch (error) {
-    console.error("Error obteniendo proyectos:", error.message);
-    return [];
-  }
-}
-
-// NUEVA FUNCIÓN: Envía el archivo binario a la galería de medios de Strapi
-async function uploadImageToStrapi(imageBuffer, filename) {
-  try {
-    const form = new FormData();
-    // Le pasamos el buffer de memoria y le inventamos un nombre de archivo
-    form.append("files", imageBuffer, { filename: filename });
-
-    const response = await axios.post(
-      `${process.env.STRAPI_URL}/api/upload`,
-      form,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
-          ...form.getHeaders(), // Strapi necesita saber que es un form-data
-        },
-      },
-    );
-
-    // Strapi devuelve un arreglo con los datos del archivo subido. Retornamos el ID.
-    return response.data[0].id;
-  } catch (error) {
-    console.error(`Error subiendo la imagen a Strapi: ${error.message}`);
-    return null;
-  }
-}
-
-async function scrapeProjectData(proyecto) {
-  const targetUrl = proyecto.url;
-  const documentId = proyecto.documentId;
-
-  console.log(
-    `\n🔍 Extrayendo datos y capturando imagen para: ${targetUrl}...`,
-  );
-
-  const browser = await puppeteer.launch({ headless: "new" });
-  const page = await browser.newPage();
-
-  // NUEVO: Configuramos el tamaño de la ventana para que la foto se vea como en una laptop de 13 pulgadas
-  await page.setViewport({ width: 1280, height: 800 });
-
-  try {
-    await page.goto(targetUrl, { waitUntil: "networkidle2" });
-
-    // --- NUEVO: LÓGICA DE LA CÁMARA ---
-    console.log("📸 Tomando captura de pantalla...");
-    // Tomamos la foto en formato JPEG para que no pese tanto en la base de datos
-    const screenshotBuffer = await page.screenshot({
-      type: "jpeg",
-      quality: 80,
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let totalHeight = 0;
+      let distance = 400;
+      let timer = setInterval(() => {
+        let scrollHeight = document.body.scrollHeight;
+        window.scrollBy(0, distance);
+        totalHeight += distance;
+        if (totalHeight >= scrollHeight - window.innerHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 300);
     });
+  });
+}
 
-    console.log("☁️ Subiendo captura a la galería de Strapi...");
-    const imageId = await uploadImageToStrapi(
-      screenshotBuffer,
-      `screenshot-${documentId}.jpg`,
-    );
-    // ----------------------------------
+async function extraerContenidoEstructurado() {
+  console.log(
+    "🤖 Iniciando Bot V5: Extracción de Galerías y Clasificación Perfecta...",
+  );
+  const browser = await puppeteer.launch({ headless: "new" });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 1080 });
+
+    console.log(`\n🔍 Explorando la página principal: ${BASE_URL}`);
+    await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
+    await autoScroll(page);
+    await new Promise((r) => setTimeout(r, 2000));
 
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    const newTitle =
-      $("head > title").first().text() ||
-      $('meta[property="og:title"]').attr("content") ||
-      "Sin título";
-    const newDescription =
-      $('meta[name="description"]').attr("content") ||
-      $('meta[property="og:description"]').attr("content") ||
-      "Sin descripción";
-    const newTechnologies = analyzeStack(html, $);
+    let items = [];
 
-    let hasChanged = false;
-    let changeSummary = [];
+    // --- 1. EXTRAER HABITACIONES Y EVENTOS ---
+    $(".data-room-container").each((i, el) => {
+      let title = $(el).find(".description-tittle").text().trim();
+      let style = $(el).attr("style") || "";
+      let match = style.match(/url\(['"]?(.*?)['"]?\)/);
+      let imageSrc = match ? match[1] : null;
 
-    if (proyecto.title !== newTitle.trim()) {
-      hasChanged = true;
-      changeSummary.push("Título modificado");
-    }
+      let modalLabel = $(el).find("label[for^='btn-modal-']").attr("for");
+      let description = "";
+      if (modalLabel) {
+        let modalNumber = modalLabel.replace("btn-modal-", "");
+        description = $(`.container-modal-${modalNumber} .content-modal`)
+          .find("p, li")
+          .map((i, p) => $(p).text().trim())
+          .get()
+          .join(". ")
+          .substring(0, 400);
+      } else {
+        description = $(el).find(".description-text").text().trim() || title;
+      }
 
-    const oldTechs = JSON.stringify(proyecto.technologies || []);
-    const currentTechs = JSON.stringify(newTechnologies);
+      if (title && imageSrc) {
+        // Si es un salón se va a Eventos, si no, a Habitaciones
+        let category = title
+          .toLowerCase()
+          .match(/salón|evento|reunión|business/)
+          ? "Eventos"
+          : "Habitaciones";
+        items.push({ title, description, imageSrc, category });
+      }
+    });
 
-    if (oldTechs !== currentTechs) {
-      hasChanged = true;
-      changeSummary.push("Stack tecnológico actualizado");
-    }
+    // --- 2. EXTRAER PLATILLOS Y PUEBLOS (Se van directo a TURISMO) ---
+    $(".hidalgo-slide-wrapper").each((i, el) => {
+      let title = $(el).find(".hidalgo-feature-subtitle").text().trim();
+      let imageSrc = $(el).find(".hidalgo-carousel-img").attr("src");
+      let description = $(el).find(".hidalgo-feature-p").last().text().trim();
+      if (title && imageSrc) {
+        items.push({ title, description, imageSrc, category: "Turismo" });
+      }
+    });
 
-    if (hasChanged) {
-      console.log(
-        `⚠️ Cambios detectados: ${changeSummary.join(", ")}. Registrando historial...`,
-      );
-      await axios.post(
-        `${process.env.STRAPI_URL}/api/actualizacions`,
-        {
-          data: {
-            summary: `Cambios automáticos: ${changeSummary.join(", ")}`,
-            date: new Date().toISOString(),
-            project: documentId,
+    // --- 3. EXTRAER LUGARES TURÍSTICOS (Se van directo a TURISMO) ---
+    $(".tourism-card").each((i, el) => {
+      let title = $(el).find(".tourism-card-title").text().trim();
+      let imageSrc = $(el).find(".tourism-card-img").attr("src");
+      let description = $(el)
+        .find(".tourism-card-text p")
+        .map((i, p) => $(p).text().trim())
+        .get()
+        .join(" ");
+      if (title && imageSrc) {
+        items.push({ title, description, imageSrc, category: "Turismo" });
+      }
+    });
+
+    // --- 4. EXTRAER LA GALERÍA "SOMOS DESTINO" (Se van directo a DESTINO) ---
+    $("#gallery a img").each((i, el) => {
+      let imageSrc = $(el).attr("data-image") || $(el).attr("src");
+      if (imageSrc) {
+        items.push({
+          title: `Instalaciones La Joya ${i + 1}`,
+          description:
+            "Descubre la elegancia y confort de los espacios que Hotel La Joya tiene preparados para hacer de tu visita una experiencia inigualable.",
+          imageSrc,
+          category: "Destino",
+        });
+      }
+    });
+
+    // --- GUARDAR EN STRAPI ---
+    let itemsExtraidos = 0;
+    for (const item of items) {
+      // Ignorar basura
+      if (
+        item.title.toLowerCase().includes("opinions") ||
+        item.title.toLowerCase().includes("we are destination")
+      )
+        continue;
+
+      let imageUrl = null;
+      try {
+        imageUrl = new URL(item.imageSrc, BASE_URL).href;
+      } catch (e) {
+        continue;
+      }
+
+      const nuevoContenido = {
+        title: item.title,
+        description: item.description.replace(/\s+/g, " ").trim(),
+        category: item.category,
+        imageUrl: imageUrl,
+      };
+
+      console.log(`✅ ¡Extraído! [${item.category}] ${item.title}`);
+
+      try {
+        await axios.post(
+          `${process.env.STRAPI_URL}/api/contents`,
+          { data: nuevoContenido },
+          {
+            headers: { Authorization: `Bearer ${process.env.STRAPI_TOKEN}` },
           },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
+        );
+        itemsExtraidos++;
+      } catch (apiError) {
+        console.error(`❌ Error Strapi en "${item.title}"`);
+      }
     }
 
-    console.log("Actualizando la ficha del proyecto...");
-
-    // Preparamos los datos base a actualizar
-    const updatePayload = {
-      title: newTitle.trim(),
-      description: newDescription.trim(),
-      technologies: newTechnologies,
-      lastChecked: new Date().toISOString(),
-    };
-
-    // NUEVO: Si la imagen se subió con éxito, vinculamos el ID al campo 'screenshots'
-    if (imageId) {
-      // Nota: Se envía dentro de un arreglo porque los campos de medios múltiples lo requieren así
-      updatePayload.screenshot = imageId;
-    }
-
-    await axios.put(
-      `${process.env.STRAPI_URL}/api/proyectos/${documentId}`,
-      {
-        data: updatePayload,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    console.log(
-      `✅ Proyecto Document ID ${documentId} actualizado correctamente (Imagen vinculada: ${!!imageId}).`,
-    );
+    console.log(`\n📥 Total de elementos guardados: ${itemsExtraidos}`);
   } catch (error) {
-    console.error(`Error procesando la URL ${targetUrl}: ${error.message}`);
+    console.error("❌ Error general en el bot:", error.message);
   } finally {
     await browser.close();
+    console.log("🏁 Proceso finalizado.");
   }
 }
 
-console.log("🤖 Bot extractor con cámara iniciado. El cron está activo...");
-
-cron.schedule("* * * * *", async () => {
-  console.log("\n⏰ [CRON] Iniciando ciclo de monitoreo...");
-
-  const proyectos = await getProjectsFromStrapi();
-
-  if (proyectos.length === 0) {
-    console.log("No hay proyectos para monitorear.");
-    return;
-  }
-
-  console.log(
-    `Se encontraron ${proyectos.length} proyectos. Iniciando análisis secuencial...`,
-  );
-
-  for (const proyecto of proyectos) {
-    if (proyecto.url) {
-      await scrapeProjectData(proyecto);
-    }
-  }
-
-  console.log("\n🏁 [CRON] Ciclo finalizado. Esperando al siguiente minuto...");
-});
+extraerContenidoEstructurado();
